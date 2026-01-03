@@ -16,7 +16,7 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Роль должна быть 'teacher' или 'student'")
 
     user = crud_user.create_user(db, user_in)
-    access_token = create_access_token(data={"sub": user.email})
+    access_token = create_access_token(data={"sub": user.email, "role": user.role})
     return {"access_token": access_token, "token_type": "bearer"}
 
 
@@ -25,5 +25,5 @@ def login(form: UserLogin, db: Session = Depends(get_db)):
     user = crud_user.get_user_by_email(db, form.email)
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
-    access_token = create_access_token(data={"sub": user.email})
+    access_token = create_access_token(data={"sub": user.email, "role": user.role})
     return {"access_token": access_token, "token_type": "bearer"}

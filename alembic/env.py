@@ -2,17 +2,23 @@
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-from app.db.base import Base  # <-- твои модели
-from app.core.config import settings  # <-- твой DATABASE_URL
+
+# Импортируем Base и настройки
+from app.db import Base
+from app.core.config import settings
+
+# Настройка Alembic
+config = context.config
 
 # Настройка логгера
-config = context.config
-fileConfig(config.config_file_name)
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
 
-# Устанавливаем URL из настроек (а не из alembic.ini)
+# Устанавливаем URL базы данных из настроек
 config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)
 
 target_metadata = Base.metadata
+
 
 def run_migrations_offline():
     """Run migrations in 'offline' mode."""
@@ -26,6 +32,7 @@ def run_migrations_offline():
 
     with context.begin_transaction():
         context.run_migrations()
+
 
 def run_migrations_online():
     """Run migrations in 'online' mode."""
@@ -43,6 +50,7 @@ def run_migrations_online():
 
         with context.begin_transaction():
             context.run_migrations()
+
 
 if context.is_offline_mode():
     run_migrations_offline()

@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
-from sqlalchemy.sql import func
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy.orm import relationship
 from app.db.base import Base
 
 class Task(Base):
@@ -7,7 +7,14 @@ class Task(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
-    description = Column(Text)
-    deadline = Column(String)  # или Date
+    description = Column(Text, nullable=False)
+    subject = Column(String, nullable=False)
+    reason = Column(String, nullable=False)
+    due_date = Column(DateTime, nullable=True)
+    grade = Column(String, nullable=False)
     teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Связь с учителем
+    teacher = relationship("User", back_populates="created_tasks")
+    # Связь с учениками
+    student_tasks = relationship("StudentTask", back_populates="task", cascade="all, delete-orphan")
