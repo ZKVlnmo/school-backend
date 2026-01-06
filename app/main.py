@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, tasks, students
+from app.api import auth, tasks, students, ai
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,3 +27,4 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(students.router, prefix="/api/students", tags=["students"])
+app.include_router(ai.router, prefix="/api/ai", tags=["ai"])

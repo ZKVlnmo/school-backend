@@ -1,16 +1,24 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 import uuid
 from pathlib import Path
 from fastapi.responses import FileResponse
+
 from app.api.deps import get_db, get_current_user
 from app.db.models.user import User
 from app.db.models.task import Task as TaskModel
 from app.db.models.student_task import StudentTask
-from app.schemas.task import Task, TaskWithSubmissionStatus
+
+from app.schemas.task import (
+    Task,
+    TaskCreateRequest,
+    TaskUpdateRequest,
+    TaskWithSubmissionStatus
+)
+from app.crud.task import create_task as crud_create_task
+from app.crud.task import update_task as crud_update_task
 
 router = APIRouter()
 
@@ -20,34 +28,14 @@ SUBMISSION_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path("uploads/tasks")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-
-class TaskCreateRequest(BaseModel):
-    title: str
-    description: str
-    subject: str
-    reason: str
-    due_date: Optional[datetime] = None
-    student_ids: List[int]
-    grade: str
-
-
-class TaskUpdateRequest(BaseModel):
-    title: str
-    description: str
-    subject: str
-    reason: str
-    due_date: Optional[datetime] = None
-    student_ids: List[int]
-
-
 ALLOWED_REASONS = {"homework", "illness", "not_submitted"}
 
 
 @router.post("/", response_model=Task, status_code=status.HTTP_201_CREATED)
-def create_task(
-        task_in: TaskCreateRequest,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+def create_task_endpoint(
+    task_in: TaskCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только учитель")
@@ -76,33 +64,20 @@ def create_task(
     if grade != task_in.grade:
         raise HTTPException(status_code=400, detail="Несоответствие класса")
 
-    db_task = TaskModel(
-        title=task_in.title,
-        description=task_in.description,
-        subject=task_in.subject,
-        reason=task_in.reason,
-        due_date=task_in.due_date,
-        grade=grade,
-        teacher_id=current_user.id
-    )
-    db.add(db_task)
-    db.commit()
-    db.refresh(db_task)
+    task_data = task_in.dict()
+    task_data["teacher_id"] = current_user.id
+    task_data["grade"] = grade
 
-    for student in students:
-        db_student_task = StudentTask(task_id=db_task.id, student_id=student.id)
-        db.add(db_student_task)
-    db.commit()
-
+    db_task = crud_create_task(db, task_data)
     return db_task
 
 
 @router.put("/{task_id}", response_model=Task)
-def update_task(
-        task_id: int,
-        task_in: TaskUpdateRequest,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+def update_task_endpoint(
+    task_id: int,
+    task_in: TaskUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только учитель")
@@ -114,13 +89,6 @@ def update_task(
     if not task:
         raise HTTPException(status_code=404, detail="Задание не найдено")
 
-    for key, value in task_in.dict().items():
-        if key != "student_ids":
-            setattr(task, key, value)
-
-    db.query(StudentTask).filter(StudentTask.task_id == task_id).delete()
-
-    students = []
     grade = task.grade
     for student_id in task_in.student_ids:
         student = db.query(User).filter(
@@ -130,46 +98,42 @@ def update_task(
         ).first()
         if not student:
             raise HTTPException(status_code=400, detail=f"Ученик {student_id} не найден")
-        students.append(student)
 
-    for student in students:
-        db_student_task = StudentTask(task_id=task_id, student_id=student.id)
-        db.add(db_student_task)
+    task_data = task_in.dict()
+    task_data["grade"] = grade
 
-    db.commit()
-    db.refresh(task)
-    return task
+    updated_task = crud_update_task(db, task_id, task_data)
+    if not updated_task:
+        raise HTTPException(status_code=404, detail="Не удалось обновить задание")
+    return updated_task
+
 
 @router.get("/by-grade/{grade}")
 def get_tasks_by_grade(
-        grade: str,
-        scope: str = "mine",
-        page: int = 1,
-        size: int = 10,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+    grade: str,
+    scope: str = "mine",
+    page: int = 1,
+    size: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только учитель")
 
     query = db.query(TaskModel).filter(TaskModel.grade == grade)
-
     if scope == "mine":
         query = query.filter(TaskModel.teacher_id == current_user.id)
     elif scope != "all":
         raise HTTPException(status_code=400, detail="scope must be 'mine' or 'all'")
 
-    query = query.order_by(TaskModel.id.desc())
     total = query.count()
-    tasks = query.offset((page - 1) * size).limit(size).all()
+    tasks = query.order_by(TaskModel.id.desc()).offset((page - 1) * size).limit(size).all()
 
     result = []
     for task in tasks:
         teacher = db.query(User.full_name).filter(User.id == task.teacher_id).first()
-        student_ids = db.query(StudentTask.student_id).filter(StudentTask.task_id == task.id).all()
-        student_ids = [sid[0] for sid in student_ids]
+        student_ids = [st.student_id for st in task.student_tasks]
 
-        # 🔽 ЗАГРУЖАЕМ ФАЙЛЫ ЗАДАНИЯ
         task_files = []
         task_dir = UPLOAD_DIR / str(task.id)
         if task_dir.exists():
@@ -186,7 +150,8 @@ def get_tasks_by_grade(
             "teacher_id": task.teacher_id,
             "teacher_name": teacher[0] if teacher else "—",
             "student_ids": student_ids,
-            "files": task_files  # ← теперь есть!
+            "files": task_files,
+            "enable_ai_analysis": task.enable_ai_analysis
         })
 
     return {
@@ -194,15 +159,18 @@ def get_tasks_by_grade(
         "total": total,
         "page": page,
         "size": size,
-        "pages": (total + size - 1) // size if size > 0 else 1
+        "pages": max(1, (total + size - 1) // size)
     }
+
+
+# === ФАЙЛОВЫЕ ОПЕРАЦИИ ===
 
 @router.post("/{task_id}/upload")
 def upload_task_files(
-        task_id: int,
-        files: List[UploadFile] = File(...),
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+    task_id: int,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только учитель")
@@ -220,17 +188,14 @@ def upload_task_files(
     task_dir = UPLOAD_DIR / str(task_id)
     task_dir.mkdir(exist_ok=True)
 
-    uploaded = []
     for file in files:
-        if not file.filename:
-            continue
-        ext = file.filename.split('.')[-1] if '.' in file.filename else ''
-        safe_name = f"{uuid.uuid4().hex}.{ext}" if ext else uuid.uuid4().hex
-        with open(task_dir / safe_name, "wb") as f:
-            f.write(file.file.read())
-        uploaded.append(file.filename)
+        if file.filename:
+            ext = file.filename.split('.')[-1] if '.' in file.filename else ''
+            safe_name = f"{uuid.uuid4().hex}.{ext}" if ext else uuid.uuid4().hex
+            with open(task_dir / safe_name, "wb") as f:
+                f.write(file.file.read())
 
-    return {"uploaded": len(uploaded)}
+    return {"uploaded": len(files)}
 
 
 @router.get("/{task_id}/files/{filename}")
@@ -240,16 +205,60 @@ def download_task_file(task_id: int, filename: str):
     file_path = UPLOAD_DIR / str(task_id) / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Файл не найден")
-    return FileResponse(file_path)
+    return FileResponse(file_path, filename=filename)
 
 
-# === НОВЫЕ ЭНДПОИНТЫ ДЛЯ ПРОВЕРКИ ЗАДАНИЙ ===
+@router.get("/{task_id}/files")
+def list_task_files(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Только учитель")
+    task = db.query(TaskModel).filter(
+        TaskModel.id == task_id,
+        TaskModel.teacher_id == current_user.id
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+
+    task_dir = UPLOAD_DIR / str(task_id)
+    files = [f.name for f in task_dir.iterdir() if f.is_file()] if task_dir.exists() else []
+    return {"files": files}
+
+
+@router.delete("/{task_id}/files/{filename}")
+def delete_task_file(
+    task_id: int,
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Только учитель")
+    task = db.query(TaskModel).filter(
+        TaskModel.id == task_id,
+        TaskModel.teacher_id == current_user.id
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+    if ".." in filename or filename.startswith("/"):
+        raise HTTPException(status_code=400, detail="Недопустимое имя файла")
+
+    file_path = UPLOAD_DIR / str(task_id) / filename
+    if file_path.exists():
+        file_path.unlink()
+    return {"detail": "Файл удалён"}
+
+
+# === ПРОВЕРКА ЗАДАНИЙ ===
 
 @router.get("/submissions")
 def get_submissions(
-        grade: Optional[str] = None,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+    grade: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только для учителей")
@@ -258,37 +267,39 @@ def get_submissions(
         StudentTask.status == "submitted",
         TaskModel.teacher_id == current_user.id
     )
-
     if grade:
         query = query.filter(TaskModel.grade == grade)
 
     submissions = query.all()
     result = []
-
     for sub in submissions:
-        student_files = []
         submission_dir = SUBMISSION_UPLOAD_DIR / str(sub.task_id) / str(sub.student_id)
-        if submission_dir.exists():
-            student_files = [f.name for f in submission_dir.iterdir() if f.is_file()]
+        student_files = [f.name for f in submission_dir.iterdir() if f.is_file()] if submission_dir.exists() else []
+        teacher = db.query(User.full_name).filter(User.id == sub.task.teacher_id).first()
 
         result.append({
             "id": sub.id,
+            "task_id": sub.task_id,
             "task_title": sub.task.title,
+            "description": sub.task.description,  # ← добавлено
+            "subject": sub.task.subject,  # ← добавлено
+            "teacher_name": teacher[0] if teacher else "—",  # ← добавлено
+            "task_enable_ai_analysis": sub.task.enable_ai_analysis,
             "student_name": sub.student.full_name,
             "grade": sub.task.grade,
             "student_comment": sub.comment,
             "student_files": student_files,
+            "ai_analysis": sub.ai_analysis,
         })
-
     return result
 
 
 @router.get("/submissions/{submission_id}/files/{filename}")
 def download_student_file(
-        submission_id: int,
-        filename: str,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+    submission_id: int,
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только для учителей")
@@ -297,9 +308,8 @@ def download_student_file(
         StudentTask.id == submission_id,
         TaskModel.teacher_id == current_user.id
     ).first()
-
     if not student_task:
-        raise HTTPException(status_code=404, detail="Файл не найден")
+        raise HTTPException(status_code=404, detail="Работа не найдена")
 
     if ".." in filename or filename.startswith("/"):
         raise HTTPException(status_code=400, detail="Недопустимое имя файла")
@@ -308,18 +318,13 @@ def download_student_file(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Файл не найден")
 
-    response = FileResponse(
-        file_path,
-        filename=filename,
-        content_disposition_type="inline"  # ← КЛЮЧЕВОЕ: открывать в браузере
-    )
-    return response
+    return FileResponse(file_path, filename=filename, content_disposition_type="inline")
 
 
 @router.post("/submissions/{submission_id}/accept")
 def accept_submission(
     submission_id: int,
-    grade: int = Form(...),  # ← теперь используем
+    grade: int = Form(...),
     comment: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -331,118 +336,42 @@ def accept_submission(
         StudentTask.id == submission_id,
         TaskModel.teacher_id == current_user.id
     ).first()
-
     if not student_task:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-
     if grade not in [2, 3, 4, 5]:
         raise HTTPException(status_code=400, detail="Оценка должна быть от 2 до 5")
 
     student_task.status = "accepted"
+    student_task.grade = grade
     student_task.teacher_comment = comment
-    student_task.grade = grade  # ← сохраняем оценку
     db.commit()
-
     return {"status": "accepted"}
 
 
 @router.post("/submissions/{submission_id}/reject")
 def reject_submission(
-        submission_id: int,
-        comment: str = Form(...),
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+    submission_id: int,
+    comment: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только для учителей")
-
     student_task = db.query(StudentTask).join(TaskModel).filter(
         StudentTask.id == submission_id,
         TaskModel.teacher_id == current_user.id
     ).first()
-
     if not student_task:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-
     if not comment.strip():
         raise HTTPException(status_code=400, detail="Комментарий обязателен")
 
     student_task.status = "rejected"
     student_task.teacher_comment = comment
     db.commit()
-
     return {"status": "rejected"}
 
-@router.get("/accepted")
-def get_accepted_tasks(
-    page: int = 1,
-    size: int = 5,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    if current_user.role != "student":
-        raise HTTPException(403, "Только для учеников")
 
-    total = db.query(TaskModel).join(StudentTask).filter(
-        StudentTask.student_id == current_user.id,
-        StudentTask.status == "accepted"
-    ).count()
-
-    tasks = (
-        db.query(TaskModel)
-        .join(StudentTask)
-        .filter(
-            StudentTask.student_id == current_user.id,
-            StudentTask.status == "accepted"
-        )
-        .order_by(TaskModel.id.desc())
-        .offset((page - 1) * size)
-        .limit(size)
-        .all()
-    )
-
-    result = []
-    for task in tasks:
-        student_task = db.query(StudentTask).filter(
-            StudentTask.task_id == task.id,
-            StudentTask.student_id == current_user.id
-        ).first()
-
-        teacher = db.query(User.full_name).filter(User.id == task.teacher_id).first()
-        teacher_name = teacher[0] if teacher else "—"
-
-        task_files = []
-        task_dir = UPLOAD_DIR / str(task.id)
-        if task_dir.exists():
-            task_files = [f.name for f in task_dir.iterdir() if f.is_file()]
-
-        student_files = []
-        submission_dir = SUBMISSION_UPLOAD_DIR / str(task.id) / str(current_user.id)
-        if submission_dir.exists():
-            student_files = [f.name for f in submission_dir.iterdir() if f.is_file()]
-
-        result.append({
-            "id": task.id,
-            "title": task.title,
-            "description": task.description,
-            "subject": task.subject,
-            "grade": task.grade,
-            "teacher_name": teacher_name,
-            "teacher_grade": student_task.grade if student_task else None,
-            "teacher_comment": student_task.teacher_comment if student_task else None,
-            "comment": student_task.comment if student_task else None,
-            "student_files": student_files,
-            "files": task_files,
-        })
-
-    return {
-        "items": result,
-        "total": total,
-        "page": page,
-        "size": size,
-        "pages": max(1, (total + size - 1) // size)
-    }
-from sqlalchemy.orm import joinedload  # ← добавьте в импорты
 @router.get("/submissions/accepted")
 def get_accepted_submissions(
     grade: Optional[str] = None,
@@ -458,22 +387,16 @@ def get_accepted_submissions(
         StudentTask.status == "accepted",
         TaskModel.teacher_id == current_user.id
     )
-
     if grade:
         query = query.filter(TaskModel.grade == grade)
 
     total = query.count()
     submissions = (
         query.order_by(StudentTask.id.desc())
-        .options(joinedload(StudentTask.student), joinedload(StudentTask.task))
         .offset((page - 1) * size)
         .limit(size)
         .all()
     )
-
-    # 👇 ЛОГИРУЕМ, ЧТО ПРИХОДИТ
-    for sub in submissions:
-        print(f"Student ID: {sub.student_id}, Full Name: {sub.student.full_name if sub.student else 'NO STUDENT'}")
 
     result = []
     for sub in submissions:
@@ -486,12 +409,16 @@ def get_accepted_submissions(
         submission_dir = SUBMISSION_UPLOAD_DIR / str(sub.task_id) / str(sub.student_id)
         if submission_dir.exists():
             student_files = [f.name for f in submission_dir.iterdir() if f.is_file()]
+        teacher = db.query(User.full_name).filter(User.id == sub.task.teacher_id).first()
 
         result.append({
             "id": sub.id,
             "task_id": sub.task_id,
             "task_title": sub.task.title,
-            "student_name": sub.student.full_name if sub.student else "—",  # ← безопасно
+            "description": sub.task.description,  # ← добавьте
+            "subject": sub.task.subject,  # ← добавьте
+            "teacher_name": teacher[0] if teacher else "—",  # ← добавьте
+            "student_name": sub.student.full_name if sub.student else "—",
             "grade": sub.task.grade,
             "teacher_grade": sub.grade,
             "teacher_comment": sub.teacher_comment,
@@ -508,11 +435,13 @@ def get_accepted_submissions(
         "size": size,
         "pages": max(1, (total + size - 1) // size)
     }
-@router.get("/{task_id}/files")
-def list_task_files(
-    task_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+
+
+@router.delete("/{task_id}")
+def delete_task(
+        task_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Только учитель")
@@ -521,39 +450,251 @@ def list_task_files(
         TaskModel.id == task_id,
         TaskModel.teacher_id == current_user.id
     ).first()
+
     if not task:
         raise HTTPException(status_code=404, detail="Задание не найдено")
 
+    # Удаляем связанные файлы задания
     task_dir = UPLOAD_DIR / str(task_id)
-    files = []
     if task_dir.exists():
-        files = [f.name for f in task_dir.iterdir() if f.is_file()]
+        import shutil
+        shutil.rmtree(task_dir)
 
-    return {"files": files}
+    # Удаляем все работы учеников
+    db.query(StudentTask).filter(StudentTask.task_id == task_id).delete()
+
+    # Удаляем само задание
+    db.delete(task)
+    db.commit()
+
+    return {"detail": "Задание удалено"}
 
 
-@router.delete("/{task_id}/files/{filename}")
-def delete_task_file(
-    task_id: int,
-    filename: str,
+@router.get("/grades/{grade}")
+def get_grades_table(
+    grade: str,
+    subject: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     if current_user.role != "teacher":
-        raise HTTPException(status_code=403, detail="Только учитель")
+        raise HTTPException(status_code=403, detail="Только для учителей")
 
+    # 1. Все ученики класса
+    students = db.query(User).filter(
+        User.grade == grade,
+        User.role == "student"
+    ).order_by(User.full_name).all()
+
+    if not students:
+        return {
+            "students": [],
+            "tasks": [],
+            "cells": {}
+        }
+
+    student_ids_list = [s.id for s in students]
+
+    # 2. Все задания для класса
+    task_query = db.query(TaskModel).filter(
+        TaskModel.grade == grade,
+        TaskModel.teacher_id == current_user.id
+    )
+    if subject and subject != "Все предметы":
+        task_query = task_query.filter(TaskModel.subject == subject)
+
+    tasks = task_query.order_by(TaskModel.due_date.desc()).all()
+
+    # 3. Загружаем student_ids для каждого задания
+    # Используем связь через StudentTask
+    task_student_map = {}
+    if tasks:
+        task_ids = [t.id for t in tasks]
+        student_assignments = db.query(StudentTask.task_id, StudentTask.student_id).filter(
+            StudentTask.task_id.in_(task_ids)
+        ).all()
+        for task_id, student_id in student_assignments:
+            if task_id not in task_student_map:
+                task_student_map[task_id] = set()
+            task_student_map[task_id].add(student_id)
+
+    # 4. Все работы учеников (присланные + принятые)
+    student_tasks = db.query(StudentTask).filter(
+        StudentTask.task_id.in_([t.id for t in tasks]),
+        StudentTask.student_id.in_(student_ids_list)
+    ).all()
+
+    st_map = {
+        (st.task_id, st.student_id): st
+        for st in student_tasks
+    }
+
+    # 5. Формируем cells
+    cells = {}
+    for task in tasks:
+        assigned_students = task_student_map.get(task.id, set())
+        for student in students:
+            key = f"{task.id}-{student.id}"
+            st = st_map.get((task.id, student.id))
+            if st:
+                cells[key] = {
+                    "status": st.status,
+                    "grade": st.grade if st.status == "accepted" else None,
+                    "submission_id": st.id
+                }
+            elif student.id in assigned_students:
+                cells[key] = {
+                    "status": "assigned",
+                    "grade": None,
+                    "submission_id": None
+                }
+            else:
+                cells[key] = {
+                    "status": "not_assigned",
+                    "grade": None,
+                    "submission_id": None
+                }
+
+    return {
+        "students": [
+            {"id": s.id, "full_name": s.full_name}
+            for s in students
+        ],
+        "tasks": [
+            {
+                "id": t.id,
+                "title": t.title,
+                "subject": t.subject,
+                "due_date": t.due_date
+            }
+            for t in tasks
+        ],
+        "cells": cells
+    }
+
+@router.get("/submission/detail")
+def get_submission_detail(
+    task_id: int,
+    student_id: int,
+    grade: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Только для учителей")
+
+    # Проверка, что задание принадлежит учителю и классу
     task = db.query(TaskModel).filter(
         TaskModel.id == task_id,
-        TaskModel.teacher_id == current_user.id
+        TaskModel.teacher_id == current_user.id,
+        TaskModel.grade == grade
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Задание не найдено")
 
-    if ".." in filename or filename.startswith("/"):
-        raise HTTPException(status_code=400, detail="Недопустимое имя файла")
+    # Ищем в присланных (status = 'submitted')
+    submission = db.query(StudentTask).filter(
+        StudentTask.task_id == task_id,
+        StudentTask.student_id == student_id
+    ).first()
 
-    file_path = UPLOAD_DIR / str(task_id) / filename
-    if file_path.exists():
-        file_path.unlink()
+    if not submission:
+        raise HTTPException(status_code=404, detail="Работа не найдена")
 
-    return {"detail": "Файл удалён"}
+    # Собираем данные
+    submission_dir = SUBMISSION_UPLOAD_DIR / str(task_id) / str(student_id)
+    student_files = [f.name for f in submission_dir.iterdir() if f.is_file()] if submission_dir.exists() else []
+    teacher = db.query(User.full_name).filter(User.id == task.teacher_id).first()
+
+    return {
+        "id": submission.id,
+        "task_id": task_id,
+        "student_id": student_id,
+        "task_title": task.title,
+        "description": task.description,
+        "subject": task.subject,
+        "teacher_name": teacher[0] if teacher else "—",
+        "task_enable_ai_analysis": task.enable_ai_analysis,
+        "student_name": submission.student.full_name if submission.student else "—",
+        "grade": task.grade,
+        "student_comment": submission.comment,
+        "teacher_comment": submission.teacher_comment,  # ← ДОБАВЛЕНО
+        "ai_analysis": submission.ai_analysis,  # ← УЖЕ БЫЛО
+        "student_files": student_files,
+        "status": submission.status,
+        "teacher_grade": submission.grade if submission.status == "accepted" else None,
+    }
+@router.get("/students/{student_id}/grades")
+def get_student_grades(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # === 1. Проверка прав доступа ===
+    if current_user.role == "student":
+        # Ученик может смотреть ТОЛЬКО СЕБЯ
+        if current_user.id != student_id:
+            raise HTTPException(status_code=403, detail="Нет доступа к чужому журналу")
+        student = current_user  # используем самого пользователя
+    elif current_user.role == "teacher":
+        # Учитель может смотреть ученика, только если тот в его классе
+        student = db.query(User).filter(
+            User.id == student_id,
+            User.role == "student"
+        ).first()
+        if not student:
+            raise HTTPException(status_code=404, detail="Ученик не найден")
+
+        # Проверяем, что ученик из класса учителя (через задания)
+        # Получаем хотя бы одно задание учителя для этого класса
+        exists = db.query(TaskModel).filter(
+            TaskModel.grade == student.grade,
+            TaskModel.teacher_id == current_user.id
+        ).first()
+        if not exists:
+            raise HTTPException(status_code=403, detail="Ученик не в вашем классе")
+    else:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    # === 2. Загрузка заданий ===
+    # Все задания для класса ученика
+    task_query = db.query(TaskModel).filter(TaskModel.grade == student.grade)
+    if current_user.role == "teacher":
+        # Учитель видит только свои задания
+        task_query = task_query.filter(TaskModel.teacher_id == current_user.id)
+    # Ученик видит задания от всех учителей своего класса — так и оставляем
+
+    tasks = task_query.all()
+    task_ids = [t.id for t in tasks]
+
+    # === 3. Загрузка работ ученика ===
+    submissions = db.query(StudentTask).filter(
+        StudentTask.student_id == student_id,
+        StudentTask.task_id.in_(task_ids)
+    ).all()
+    submission_map = {s.task_id: s for s in submissions}
+
+    # === 4. Группировка по предметам ===
+    subjects = {}
+    for task in tasks:
+        if task.subject not in subjects:
+            subjects[task.subject] = []
+        submission = submission_map.get(task.id)
+        subjects[task.subject].append({
+            "task_id": task.id,
+            "title": task.title,
+            "due_date": task.due_date,
+            "status": submission.status if submission else "assigned",
+            "grade": submission.grade if submission and submission.status == "accepted" else None,
+            "has_submission": submission is not None,
+            "submission_id": submission.id if submission else None
+        })
+
+    return {
+        "student": {
+            "id": student.id,
+            "full_name": student.full_name,
+            "grade": student.grade
+        },
+        "subjects": subjects
+    }
