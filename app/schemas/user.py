@@ -31,7 +31,7 @@ class User(BaseModel):
     email: str
     full_name: str
     role: str
-
+    is_verified: bool
     class Config:
         from_attributes = True
 
@@ -41,6 +41,6 @@ class UserOut(BaseModel):
     full_name: str
     role: str
     grade: Optional[str] = None
-
+    is_verified: bool
     class Config:
         from_attributes = True  # для SQL

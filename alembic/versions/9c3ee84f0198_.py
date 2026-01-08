@@ -1,8 +1,8 @@
-"""Initial schema with correct table namessss
+"""empty message
 
-Revision ID: 625eae5752b6
+Revision ID: 9c3ee84f0198
 Revises: 
-Create Date: 2026-01-03 15:31:21.482503
+Create Date: 2026-01-07 23:24:44.520709
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '625eae5752b6'
+revision: str = '9c3ee84f0198'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -24,9 +24,10 @@ def upgrade() -> None:
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('email', sa.String(), nullable=False),
     sa.Column('full_name', sa.String(), nullable=False),
-    sa.Column('role', sa.String(), nullable=False),
     sa.Column('hashed_password', sa.String(), nullable=False),
+    sa.Column('role', sa.String(), nullable=False),
     sa.Column('grade', sa.String(), nullable=True),
+    sa.Column('is_verified', sa.Boolean(), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
@@ -40,20 +41,21 @@ def upgrade() -> None:
     sa.Column('due_date', sa.DateTime(), nullable=True),
     sa.Column('grade', sa.String(), nullable=False),
     sa.Column('teacher_id', sa.Integer(), nullable=False),
+    sa.Column('enable_ai_analysis', sa.Boolean(), nullable=False),
     sa.ForeignKeyConstraint(['teacher_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_tasks_id'), 'tasks', ['id'], unique=False)
     op.create_table('student_task',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('task_id', sa.Integer(), nullable=False),
-    sa.Column('student_id', sa.Integer(), nullable=False),
-    sa.Column('is_submitted', sa.Boolean(), nullable=False),
-    sa.Column('submitted_at', sa.DateTime(), nullable=True),
-    sa.Column('comment', sa.Text(), nullable=True),
+    sa.Column('task_id', sa.Integer(), nullable=True),
+    sa.Column('student_id', sa.Integer(), nullable=True),
     sa.Column('status', sa.String(), nullable=True),
-    sa.Column('teacher_comment', sa.Text(), nullable=True),
+    sa.Column('comment', sa.Text(), nullable=True),
     sa.Column('grade', sa.Integer(), nullable=True),
+    sa.Column('teacher_comment', sa.Text(), nullable=True),
+    sa.Column('submitted_at', sa.DateTime(), nullable=True),
+    sa.Column('ai_analysis', sa.Text(), nullable=True),
     sa.ForeignKeyConstraint(['student_id'], ['users.id'], ),
     sa.ForeignKeyConstraint(['task_id'], ['tasks.id'], ),
     sa.PrimaryKeyConstraint('id')

@@ -36,6 +36,7 @@ def login(form: UserLogin, db: Session = Depends(get_db)):
             "email": user.email,
             "full_name": user.full_name,
             "role": user.role,
-            "grade": user.grade
+            "grade": user.grade,
+            "is_verified":user.is_verified
         }
     }

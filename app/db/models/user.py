@@ -1,5 +1,5 @@
 # app/db/models/user.py
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime,Boolean
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 from datetime import datetime
@@ -13,7 +13,10 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False)  # "student", "teacher"
     grade = Column(String, nullable=True)  # только для учеников
-
+    is_verified = Column(Boolean, default=False)
     # Связи
     created_tasks = relationship("Task", back_populates="teacher")
-    student_tasks = relationship("StudentTask", back_populates="student")  # ← ОБЯЗАТЕЛЬНО!
+    student_tasks = relationship("StudentTask", back_populates="student")  # ← ОБЯЗАТЕЛЬНО
+    # 👇 ДОБАВЬ ЭТУ СТРОКУ:
+    attendance_records = relationship("Attendance", back_populates="student")
+    # !

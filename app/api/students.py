@@ -27,16 +27,27 @@ SUBMISSION_UPLOAD_DIR = SysPath("uploads/submissions")
 SUBMISSION_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-@router.get("/grade/{grade}", response_model=List[UserOut])
-def get_students_by_grade_endpoint(
-    grade: str = Path(..., description="Номер класса, например: 10А, 9Б"),
+@router.get("/{grade}", response_model=List[UserOut])
+def get_students_by_grade(
+    grade: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    students = get_students_by_grade(db, grade)
-    return students
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Только для учителей")
 
-@router.get("/tasks")
-def get_student_tasks(
+    students = db.query(User).filter(
+        User.role == "student",
+        User.grade == grade
+    ).all()
+
+    # ❌ НЕ ВЫЗЫВАЙ 404, если учеников нет!
+    # Это нормальная ситуация (новый класс, каникулы и т.д.)
+    return students  # может быть пустым списком []
+
+
+@router.get("/tasks/new")
+def get_student_tasks_new(
     page: int = 1,
     size: int = 5,
     db: Session = Depends(get_db),
@@ -45,12 +56,10 @@ def get_student_tasks(
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Только для учеников")
 
-    # Подсчёт общего количества заданий для ученика
     total = db.query(StudentTask).filter(
         StudentTask.student_id == current_user.id
     ).count()
 
-    # Получаем студент_таски с пагинацией
     student_tasks = (
         db.query(StudentTask)
         .filter(StudentTask.student_id == current_user.id)
@@ -64,18 +73,16 @@ def get_student_tasks(
     for st in student_tasks:
         task = st.task
         if not task:
-            continue  # пропускаем, если задание удалено
+            continue
 
         teacher = db.query(User.full_name).filter(User.id == task.teacher_id).first()
         teacher_name = teacher[0] if teacher else "—"
 
-        # Файлы задания
         task_files = []
         task_dir = UPLOAD_DIR / str(task.id)
         if task_dir.exists():
             task_files = [f.name for f in task_dir.iterdir() if f.is_file()]
 
-        # Файлы ученика
         student_files = []
         submission_dir = SUBMISSION_UPLOAD_DIR / str(task.id) / str(current_user.id)
         if submission_dir.exists():
@@ -106,6 +113,57 @@ def get_student_tasks(
         "size": size,
         "pages": max(1, (total + size - 1) // size)
     }
+
+
+@router.post("/tasks/{task_id}/submit")
+async def submit_task(
+    task_id: int,
+    comment: Optional[str] = Form(default=None),
+    files: List[UploadFile] = File(default_factory=list),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Только для учеников")
+
+    student_task = db.query(StudentTask).filter(
+        StudentTask.task_id == task_id,
+        StudentTask.student_id == current_user.id
+    ).first()
+
+    if not student_task:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+
+    student_task.is_submitted = True
+    student_task.submitted_at = datetime.utcnow()
+    student_task.comment = comment
+    student_task.status = "submitted"
+    student_task.teacher_comment = None
+
+    if files:
+        task_dir = SUBMISSION_UPLOAD_DIR / str(task_id) / str(current_user.id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        for file in files:
+            if file.filename:
+                ext = file.filename.split('.')[-1] if '.' in file.filename else ''
+                safe_name = f"{uuid.uuid4().hex}.{ext}" if ext else uuid.uuid4().hex
+                content = await file.read()
+                with open(task_dir / safe_name, "wb") as f:
+                    f.write(content)
+
+    db.commit()
+    if student_task.task.enable_ai_analysis:
+        from app.db.session import SessionLocal
+        bg_db = SessionLocal()
+        asyncio.create_task(
+            analyze_and_save_ai(
+                db=bg_db,
+                student_task_id=student_task.id,
+                teacher_task=student_task.task.description,
+                student_answer=student_task.comment or ""
+            )
+        )
+    return {"status": "submitted", "message": "Задание отправлено на проверку"}
 
 @router.post("/tasks/{task_id}/submit")
 async def submit_task(
@@ -167,5 +225,7 @@ async def submit_task(
             )
         )
     return {"status": "submitted", "message": "Задание отправлено на проверку"}
+
+
 
 

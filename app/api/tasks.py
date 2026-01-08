@@ -571,110 +571,50 @@ def get_grades_table(
         ],
         "cells": cells
     }
-
-@router.get("/submission/detail")
-def get_submission_detail(
-    task_id: int,
-    student_id: int,
-    grade: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    if current_user.role != "teacher":
-        raise HTTPException(status_code=403, detail="Только для учителей")
-
-    # Проверка, что задание принадлежит учителю и классу
-    task = db.query(TaskModel).filter(
-        TaskModel.id == task_id,
-        TaskModel.teacher_id == current_user.id,
-        TaskModel.grade == grade
-    ).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Задание не найдено")
-
-    # Ищем в присланных (status = 'submitted')
-    submission = db.query(StudentTask).filter(
-        StudentTask.task_id == task_id,
-        StudentTask.student_id == student_id
-    ).first()
-
-    if not submission:
-        raise HTTPException(status_code=404, detail="Работа не найдена")
-
-    # Собираем данные
-    submission_dir = SUBMISSION_UPLOAD_DIR / str(task_id) / str(student_id)
-    student_files = [f.name for f in submission_dir.iterdir() if f.is_file()] if submission_dir.exists() else []
-    teacher = db.query(User.full_name).filter(User.id == task.teacher_id).first()
-
-    return {
-        "id": submission.id,
-        "task_id": task_id,
-        "student_id": student_id,
-        "task_title": task.title,
-        "description": task.description,
-        "subject": task.subject,
-        "teacher_name": teacher[0] if teacher else "—",
-        "task_enable_ai_analysis": task.enable_ai_analysis,
-        "student_name": submission.student.full_name if submission.student else "—",
-        "grade": task.grade,
-        "student_comment": submission.comment,
-        "teacher_comment": submission.teacher_comment,  # ← ДОБАВЛЕНО
-        "ai_analysis": submission.ai_analysis,  # ← УЖЕ БЫЛО
-        "student_files": student_files,
-        "status": submission.status,
-        "teacher_grade": submission.grade if submission.status == "accepted" else None,
-    }
 @router.get("/students/{student_id}/grades")
 def get_student_grades(
     student_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # === 1. Проверка прав доступа ===
-    if current_user.role == "student":
-        # Ученик может смотреть ТОЛЬКО СЕБЯ
-        if current_user.id != student_id:
-            raise HTTPException(status_code=403, detail="Нет доступа к чужому журналу")
-        student = current_user  # используем самого пользователя
-    elif current_user.role == "teacher":
-        # Учитель может смотреть ученика, только если тот в его классе
-        student = db.query(User).filter(
-            User.id == student_id,
-            User.role == "student"
-        ).first()
-        if not student:
-            raise HTTPException(status_code=404, detail="Ученик не найден")
+    # === Получаем ученика ===
+    student = db.query(User).filter(
+        User.id == student_id,
+        User.role == "student"
+    ).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Ученик не найден")
 
-        # Проверяем, что ученик из класса учителя (через задания)
-        # Получаем хотя бы одно задание учителя для этого класса
-        exists = db.query(TaskModel).filter(
-            TaskModel.grade == student.grade,
-            TaskModel.teacher_id == current_user.id
-        ).first()
-        if not exists:
-            raise HTTPException(status_code=403, detail="Ученик не в вашем классе")
+    # === Проверка доступа ===
+    if current_user.role == "teacher":
+        # Учитель имеет доступ ко ВСЕМ ученикам (без ограничений)
+        pass  # Никаких проверок!
+
+    elif current_user.role == "student":
+        if current_user.id != student_id:
+            raise HTTPException(status_code=403, detail="Нет доступа")
     else:
         raise HTTPException(status_code=403, detail="Доступ запрещён")
 
-    # === 2. Загрузка заданий ===
-    # Все задания для класса ученика
-    task_query = db.query(TaskModel).filter(TaskModel.grade == student.grade)
+    # === Получаем задания ===
+    tasks = db.query(TaskModel).filter(
+        TaskModel.grade == student.grade
+    ).all()
+
     if current_user.role == "teacher":
-        # Учитель видит только свои задания
-        task_query = task_query.filter(TaskModel.teacher_id == current_user.id)
-    # Ученик видит задания от всех учителей своего класса — так и оставляем
+        # Учитель видит ВСЕ задания в классе ученика (даже других учителей)
+        # Если нужно видеть ТОЛЬКО свои — раскомментируй строку ниже:
+        # tasks = [t for t in tasks if t.teacher_id == current_user.id]
+        pass  # Оставляем все задания
 
-    tasks = task_query.all()
     task_ids = [t.id for t in tasks]
-
-    # === 3. Загрузка работ ученика ===
     submissions = db.query(StudentTask).filter(
         StudentTask.student_id == student_id,
         StudentTask.task_id.in_(task_ids)
     ).all()
+
     submission_map = {s.task_id: s for s in submissions}
 
-    # === 4. Группировка по предметам ===
     subjects = {}
     for task in tasks:
         if task.subject not in subjects:
@@ -686,8 +626,6 @@ def get_student_grades(
             "due_date": task.due_date,
             "status": submission.status if submission else "assigned",
             "grade": submission.grade if submission and submission.status == "accepted" else None,
-            "has_submission": submission is not None,
-            "submission_id": submission.id if submission else None
         })
 
     return {
@@ -698,3 +636,68 @@ def get_student_grades(
         },
         "subjects": subjects
     }
+@router.get("/submission/detail")
+def get_submission_detail(
+    task_id: int,
+    student_id: int,
+    grade: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Получаем задание
+    task = db.query(TaskModel).filter(
+        TaskModel.id == task_id,
+        TaskModel.grade == grade
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+
+    # Проверка доступа
+    if current_user.role == "teacher":
+        if task.teacher_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Нет доступа")
+    elif current_user.role == "student":
+        if current_user.id != student_id:
+            raise HTTPException(status_code=403, detail="Нет доступа")
+    else:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    # Получаем ученика
+    student = db.query(User).filter(User.id == student_id, User.role == "student").first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Ученик не найден")
+
+    # Ищем работу
+    submission = db.query(StudentTask).filter(
+        StudentTask.task_id == task_id,
+        StudentTask.student_id == student_id
+    ).first()
+
+    # Собираем данные (даже если submission = None)
+    submission_dir = SUBMISSION_UPLOAD_DIR / str(task_id) / str(student_id)
+    student_files = [f.name for f in submission_dir.iterdir() if f.is_file()] if submission_dir.exists() else []
+    teacher = db.query(User.full_name).filter(User.id == task.teacher_id).first()
+
+    response = {
+        "id": submission.id if submission else None,
+        "task_id": task_id,
+        "student_id": student_id,
+        "task_title": task.title,
+        "description": task.description,
+        "subject": task.subject,
+        "teacher_name": teacher[0] if teacher else "—",
+        "task_enable_ai_analysis": task.enable_ai_analysis,
+        "student_name": student.full_name,
+        "grade": task.grade,
+        "student_comment": submission.comment if submission else None,
+        "teacher_comment": submission.teacher_comment if submission else None,
+        "student_files": student_files if submission else [],
+        "status": submission.status if submission else "assigned",
+        "teacher_grade": submission.grade if submission and submission.status == "accepted" else None,
+    }
+
+    # Только учитель видит анализ ИИ
+    if current_user.role == "teacher" and submission:
+        response["ai_analysis"] = submission.ai_analysis
+
+    return response
