@@ -1,5 +1,5 @@
 from pydantic import BaseModel, validator
-from typing import Optional
+from typing import Optional, List
 
 class UserCreate(BaseModel):
     email: str
@@ -44,3 +44,16 @@ class UserOut(BaseModel):
     is_verified: bool
     class Config:
         from_attributes = True  # для SQL
+
+
+
+class StudentGenerationRequest(BaseModel):
+    grade: str
+
+class GeneratedStudent(BaseModel):
+    full_name: str
+    email: str
+    password: str
+
+class StudentGenerationResponse(BaseModel):
+    students: List[GeneratedStudent]
