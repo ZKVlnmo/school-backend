@@ -32,15 +32,31 @@ def update_task(db: Session, task_id: int, task_data: dict) -> TaskModel:
     if not task:
         return None
 
+    # 1. Обновляем скалярные поля задачи (title, description и т.д.)
     for key, value in task_data.items():
         if key != "student_ids":
             setattr(task, key, value)
 
-    # Обновляем студентов
-    db.query(StudentTask).filter(StudentTask.task_id == task_id).delete()
-    for student_id in task_data.get("student_ids", []):
-        db_student_task = StudentTask(task_id=task_id, student_id=student_id)
-        db.add(db_student_task)
+    # 2. Обновляем список учеников ТОЛЬКО если он передан
+    if "student_ids" in task_data:
+        new_student_ids = set(task_data["student_ids"])
+        existing_records = {st.student_id: st for st in task.student_tasks}
+
+        # Добавляем новых учеников (которых ещё нет)
+        for sid in new_student_ids - existing_records.keys():
+            db.add(StudentTask(task_id=task_id, student_id=sid, status="assigned"))
+
+        # Удаляем учеников, которых убрали из списка — НО ТОЛЬКО ЕСЛИ СТАТУС = 'assigned'
+        for sid, record in existing_records.items():
+            if sid not in new_student_ids:
+                if record.status == "assigned":
+                    db.delete(record)
+                else:
+                    # Ученик уже что-то прислал — нельзя удалить!
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Нельзя удалить ученика {sid}: есть присланная или проверенная работа"
+                    )
 
     db.commit()
     db.refresh(task)
