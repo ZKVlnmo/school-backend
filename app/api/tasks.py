@@ -701,3 +701,61 @@ def get_submission_detail(
         response["ai_analysis"] = submission.ai_analysis
 
     return response
+
+
+@router.get("/my/grades")
+def get_my_grades(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Для ученика: получить только его собственные задания и оценки.
+    Учитель или админ не могут использовать этот эндпоинт.
+    """
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Только для учеников")
+
+    student_id = current_user.id
+    student = current_user  # уже загружен через get_current_user
+
+    # Получаем все StudentTask для текущего ученика
+    student_tasks = db.query(StudentTask).filter(
+        StudentTask.student_id == student_id
+    ).all()
+
+    if not student_tasks:
+        return {
+            "student": {
+                "id": student.id,
+                "full_name": student.full_name,
+                "grade": student.grade
+            },
+            "subjects": {}
+        }
+
+    task_ids = [st.task_id for st in student_tasks]
+    tasks = db.query(TaskModel).filter(TaskModel.id.in_(task_ids)).all()
+    task_map = {t.id: t for t in tasks}
+    submission_map = {st.task_id: st for st in student_tasks}
+
+    subjects = {}
+    for task_id, task in task_map.items():
+        submission = submission_map[task_id]
+        if task.subject not in subjects:
+            subjects[task.subject] = []
+        subjects[task.subject].append({
+            "task_id": task.id,
+            "title": task.title,
+            "due_date": task.due_date,
+            "status": submission.status,
+            "grade": submission.grade if submission.status == "accepted" else None,
+        })
+
+    return {
+        "student": {
+            "id": student.id,
+            "full_name": student.full_name,
+            "grade": student.grade
+        },
+        "subjects": subjects
+    }
