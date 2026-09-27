@@ -61,6 +61,9 @@ def login(form: UserLogin, db: Session = Depends(get_db)):
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
 
+    if user.role == "teacher" and not user.is_verified:
+        raise HTTPException(status_code=403, detail="Учетная запись учителя не подтверждена")
+
     access_token = create_access_token(data={"sub": user.email, "role": user.role})
 
     return {
